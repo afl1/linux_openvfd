@@ -1,5 +1,8 @@
+
 #include <linux/gpio.h>
 #include <linux/version.h>
+#include <linux/i2c.h>
+
 #include "i2c.h"
 
 #define pr_dbg2(args...) printk(KERN_DEBUG "OpenVFD: " args)
@@ -34,6 +37,7 @@ union address {
 static void i2c_stop_condition(void);
 
 static union address i2c_address = { 0 };
+static struct i2c_adapter *i2c;
 static unsigned char use_address = 0;
 static unsigned char long_address = 0;
 static unsigned long i2c_delay = I2C_DELAY_100KHz;
@@ -66,16 +70,10 @@ struct protocol_interface *init_i2c(unsigned short _address, unsigned char _lsb_
 		} else {
 			use_address = 0;
 		}
-		lsb_first = _lsb_first;
-		pin_scl = _pin_scl;
-		pin_sda = _pin_sda;
-		i2c_delay = _i2c_delay;
-		clk_stretch_timeout = 10 * _i2c_delay;
-		if (_pin_scl.flags.bits.pullup_on)
-			gpio_set_pullup(_pin_scl.pin, 1);
-		if (_pin_sda.flags.bits.pullup_on)
-			gpio_set_pullup(_pin_sda.pin, 1);
-		i2c_stop_condition();
+		i2c = i2c_get_adapter(3); // FIXME only for test fixed to i2c_3, Odroid N2 pin 27,28
+		if (i2c)
+			pr_dbg2("Found i2c-%d adapter: %s\n", 3 , i2c->name);
+
 		if (!i2c_test_connection()) {
 			i2c_ptr = &i2c_interface;
 			pr_dbg2("I2C interface intialized (address = 0x%04X%s, %s mode, pull-ups %s)\n", i2c_address.value, !use_address ? " (N/A)" : "",
@@ -197,20 +195,57 @@ static unsigned char i2c_write_address(union address _address, unsigned char rw)
 	}
 	return ret;
 }
+static int i2c_writereg(u8 *data, u16 *size)
+{
+	int ret;
+	struct i2c_msg msg[1] = {
+			{
+				.addr = i2c_address,
+				.flags = 0,
+				.buf = data,
+				.len = *size,
+			}
+	};
 
+	ret = i2c_transfer(i2c, msg, 1);
+	if (ret == 1) {
+		ret = 0;
+	} else {
+		dev_warn(&i2c->dev, "i2c wr failed=%d", ret);
+		ret = -EREMOTEIO;
+	}
+
+	return ret;
+}
+
+static int i2c_readreg(u8 * data, u16 * size)
+{
+	int ret;
+	struct i2c_msg msg[1] = {
+			{
+					.addr = i2c_address,
+					.flags = I2C_M_RD,
+					.buf = data,
+					.len = *size,
+			}
+	};
+
+	ret = i2c_transfer(i2c, msg, 1);
+
+	if (ret == 1) {
+		ret = 0;
+	} else {
+		dev_warn(&i2c->dev, "i2c rd failed=%d", ret);
+		ret = -EREMOTEIO;
+	}
+
+	return ret;
+}
 static unsigned char i2c_read_cmd_data(const unsigned char *cmd, unsigned int cmd_length, unsigned char *data, unsigned int data_length)
 {
 	unsigned char status = 0;
-	i2c_start_condition();
-	if (use_address)
-		status = i2c_write_address(i2c_address, 1);
-	if (cmd) {
-		while (!status && cmd_length--)
-			status |= i2c_write_raw_byte(*cmd++);
-	}
-	while (!status && data_length--)
-		status |= i2c_read_raw_byte(data++);
-	i2c_stop_condition();
+
+	status = i2c_readreg(data, dat_length);
 	return status;
 }
 
@@ -227,17 +262,17 @@ static unsigned char i2c_read_byte(unsigned char *bdata)
 static unsigned char i2c_write_cmd_data(const unsigned char *cmd, unsigned int cmd_length, const unsigned char *data, unsigned int data_length)
 {
 	unsigned char status = 0;
-	i2c_start_condition();
-	if (use_address)
-		status = i2c_write_address(i2c_address, 0);
-	if (cmd) {
-		while (!status && cmd_length--)
-			status |= i2c_write_raw_byte(*cmd++);
-	}
-	while (!status && data_length--)
-			status |= i2c_write_raw_byte(*data++);
-	i2c_stop_condition();
-	return status;
+	u8 buf[20];
+
+	if (cmd)
+		memcpy(cmd, buf, cmd_length);
+
+	if (cmd)
+		memcpy(data + cmd_length, buf, data_length);
+
+	status = i2c_writereg(buf, cmd_length + data_length);
+
+return status;
 }
 
 static unsigned char i2c_write_data(const unsigned char *data, unsigned int length)
